@@ -1,58 +1,138 @@
 import pygame
 import serial
+import serial.tools.list_ports
 import time
+import sys
 
-# Connect to Arduino
-arduino = serial.Serial('/dev/ttyACM0', 9600, timeout=1)
-time.sleep(2)
+BAUD_RATE = 9600
+DEADZONE = 0.15
+PREFERRED_PORT = "/dev/serial/by-id/usb-Arduino__www.arduino.cc__0042_43439353536351505042-if00"
 
-# Initialize Xbox controller
-pygame.init()
-pygame.joystick.init()
+def find_arduino():
+    try:
+        ser = serial.Serial(PREFERRED_PORT, BAUD_RATE, timeout=1)
+        time.sleep(2)
+        print(f"Connected to Arduino on {PREFERRED_PORT}")
+        return ser
+    except:
+        pass
 
-joystick = pygame.joystick.Joystick(0)
-joystick.init()
+    ports = serial.tools.list_ports.comports()
+    for port in ports:
+        if "Arduino" in port.description or "ttyACM" in port.device:
+            try:
+                ser = serial.Serial(port.device, BAUD_RATE, timeout=1)
+                time.sleep(2)
+                print(f"Connected to Arduino on {port.device}")
+                return ser
+            except:
+                continue
 
-print("Controller connected:", joystick.get_name())
+    return None
 
-def map_axis_to_speed(value):
-    """Convert joystick axis (-1 to 1) to PWM (0 to 255)."""
-    return int(abs(value) * 255)
+def wait_for_arduino():
+    while True:
+        arduino = find_arduino()
+        if arduino is not None:
+            return arduino
+        print("Waiting for Arduino...")
+        time.sleep(1)
+
+def wait_for_controller():
+    pygame.init()
+    pygame.joystick.init()
+
+    while pygame.joystick.get_count() == 0:
+        print("Waiting for Xbox controller...")
+        pygame.event.pump()
+        time.sleep(1)
+
+    js = pygame.joystick.Joystick(0)
+    js.init()
+    print("Controller connected:", js.get_name())
+    return js
+
+def apply_deadzone(value, deadzone=DEADZONE):
+    if abs(value) < deadzone:
+        return 0.0
+    return value
+
+def safe_write(arduino, msg):
+    try:
+        arduino.write(msg.encode())
+    except serial.SerialException as e:
+        print("Serial write failed:", e)
+        raise
+
+arduino = wait_for_arduino()
+joystick = wait_for_controller()
 
 try:
     while True:
         pygame.event.pump()
 
-        y_axis = joystick.get_axis(1)  # Forward/back
-        x_axis = joystick.get_axis(3)  # Turn
+        left_input = -joystick.get_axis(1)
+        right_input = -joystick.get_axis(3)
 
-        cmd = 'S'
-        speed = 0
+        left_input = apply_deadzone(left_input)
+        right_input = apply_deadzone(right_input)
 
-        if abs(y_axis) > 0.2:  # Forward/back control
-            speed = map_axis_to_speed(y_axis)
-            if y_axis < 0:
-                cmd = 'F'
-            else:
-                cmd = 'B'
-        elif abs(x_axis) > 0.2:  # Left/right turn
-            speed = map_axis_to_speed(x_axis)
-            if x_axis < 0:
-                cmd = 'L'
-            else:
-                cmd = 'R'
+        left_speed = int(left_input * 255)
+        right_speed = int(right_input * 255)
+
+        safe_write(arduino, f"DRIVE,{left_speed},{right_speed}\n")
+
+        if joystick.get_button(0):       # A
+            safe_write(arduino, "BOOM,255\n")
+        elif joystick.get_button(1):     # B
+            safe_write(arduino, "BOOM,-255\n")
         else:
-            cmd = 'S'
-            speed = 0
+            safe_write(arduino, "BOOM,0\n")
 
-        message = f"{cmd},{speed}\n"
-        arduino.write(message.encode())
-        print(f"Sent: {message.strip()}")
+        if joystick.get_button(2):       # X
+            safe_write(arduino, "DIPPER,255\n")
+        elif joystick.get_button(3):     # Y
+            safe_write(arduino, "DIPPER,-255\n")
+        else:
+            safe_write(arduino, "DIPPER,0\n")
+
+        hat = joystick.get_hat(0)
+
+        if hat == (0, 1):
+            safe_write(arduino, "BUCKET,255\n")
+        elif hat == (0, -1):
+            safe_write(arduino, "BUCKET,-255\n")
+        else:
+            safe_write(arduino, "BUCKET,0\n")
+
+        if hat == (-1, 0):
+            safe_write(arduino, "BASE,-1\n")
+        elif hat == (1, 0):
+            safe_write(arduino, "BASE,1\n")
+        else:
+            safe_write(arduino, "BASE,0\n")
 
         time.sleep(0.05)
 
 except KeyboardInterrupt:
-    print("Exiting...")
-    arduino.write(b"S,0\n")
+    print("Stopping...")
+    try:
+        arduino.write(b"STOP_ALL\n")
+    except:
+        pass
     arduino.close()
     pygame.quit()
+    sys.exit(0)
+
+except Exception as e:
+    print("Unexpected error:", e)
+    try:
+        arduino.write(b"STOP_ALL\n")
+    except:
+        pass
+    try:
+        arduino.close()
+    except:
+        pass
+    pygame.quit()
+    sys.exit(1)
