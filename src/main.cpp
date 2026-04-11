@@ -63,8 +63,8 @@ const int BASE_STEP = 3;
 // -----------------------------
 bool invertLF     = false;
 bool invertLR     = false;
-bool invertRF     = false;
-bool invertRR     = false;
+bool invertRF     = true;
+bool invertRR     = true;
 
 bool invertBoom   = false;
 bool invertDipper = false;
